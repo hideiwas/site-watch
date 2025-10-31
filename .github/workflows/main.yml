@@ -1,0 +1,13 @@
+name: Hello Actions
+
+on:
+  schedule:
+    - cron: '0 * * * *'   # 毎時0分に実行（UTC）
+  workflow_dispatch:       # 手動実行ボタンを有効化
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Show message
+        run: echo "GitHub Actionsが動きました！ $(date)"
