@@ -1,0 +1,114 @@
+name: Watch Bitget Launchpool (every 4h, mail diff)
+
+on:
+  schedule:
+    - cron: '0 */4 * * *'    # 4時間ごと（UTC）
+  workflow_dispatch:          # 手動実行ボタン
+
+permissions:
+  contents: write             # 差分検知後の状態ファイルをコミットするため
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Install tools (lynx for text dump, dos2unix)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y lynx dos2unix
+
+      - name: Fetch target page
+        env:
+          URL: https://www.bitget.com/ja/events/launchpool
+        run: |
+          mkdir -p state
+          # 取得（タイムアウト/言語/UAを指定）
+          curl -sS --max-time 30 \
+            -H 'Accept-Language: ja,en;q=0.8' \
+            -A 'SiteWatchBot/1.0 (+github-actions)' \
+            "$URL" -o state/current.html
+
+          # HTML→テキスト（広告/JSの影響を減らすため）
+          # -nolist: リンク番号を付けない
+          lynx -dump -nolist state/current.html > state/current.txt || true
+
+          # 改行コードや空白のゆらぎを最小化
+          dos2unix state/current.txt 2>/dev/null || true
+          sed -i 's/[[:space:]]\+$//' state/current.txt
+          # 監視のノイズになりやすい日付/時刻の断片を軽く除去（必要に応じて調整）
+          sed -i -E 's/[0-9]{2}:[0-9]{2}(:[0-9]{2})?//g' state/current.txt
+
+      - name: Compute diff
+        id: diff
+        run: |
+          set -e
+          if [ -f state/last.txt ]; then
+            # 差分を unified 形式で作成
+            diff -u state/last.txt state/current.txt > state/diff.txt || true
+            if [ -s state/diff.txt ]; then
+              echo "changed=true" >> $GITHUB_OUTPUT
+            else
+              echo "changed=false" >> $GITHUB_OUTPUT
+            fi
+          else
+            # 初回は差分扱い（基準を作るため）
+            echo "No previous snapshot. Creating baseline."
+            cp state/current.txt state/last.txt
+            echo "changed=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Update baseline (commit new snapshot)
+        if: steps.diff.outputs.changed == 'true'
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "Update snapshot: Bitget Launchpool changed"
+          file_pattern: |
+            state/current.html
+            state/current.txt
+            state/last.txt
+        env:
+          GIT_AUTHOR_NAME: site-watch-bot
+          GIT_AUTHOR_EMAIL: actions@github.com
+          GIT_COMMITTER_NAME: site-watch-bot
+          GIT_COMMITTER_EMAIL: actions@github.com
+        # commit前にlast.txtを更新
+      - name: Refresh last.txt
+        if: steps.diff.outputs.changed == 'true'
+        run: |
+          cp state/current.txt state/last.txt
+
+      - name: Prepare mail body
+        if: steps.diff.outputs.changed == 'true'
+        run: |
+          {
+            echo "Bitget Launchpool ページに変更を検知しました。"
+            echo
+            echo "URL: https://www.bitget.com/ja/events/launchpool"
+            echo "Detected at: $(TZ=Asia/Tokyo date '+%Y-%m-%d %H:%M:%S %Z')"
+            echo
+            echo "---- DIFF (old -> new) ----"
+            echo
+            cat state/diff.txt
+          } > state/mail.txt
+
+      - name: Send mail (Gmail SMTP)
+        if: steps.diff.outputs.changed == 'true'
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 465
+          secure: true
+          username: ${{ secrets.SMTP_USERNAME }}
+          password: ${{ secrets.SMTP_PASSWORD }}
+          subject: "[Site Watch] Bitget Launchpool に更新を検知"
+          to: ${{ secrets.MAIL_TO }}
+          from: ${{ secrets.SMTP_USERNAME }}
+          body: file://state/mail.txt
+          attachments: |
+            state/diff.txt
+            state/current.html
+            state/current.txt
